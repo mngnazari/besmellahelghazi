@@ -53,7 +53,7 @@ def create_tables():
                      full_name TEXT,
                      phone TEXT UNIQUE,
                      inviter_id INTEGER,
-                     remaining_invites INTEGER DEFAULT 5,
+                     remaining_invites INTEGER DEFAULT 1,
                      created_at TEXT,
                      updated_at TEXT
                  )''')
