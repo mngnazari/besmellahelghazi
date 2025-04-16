@@ -8,6 +8,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not database.get_user(user.id):

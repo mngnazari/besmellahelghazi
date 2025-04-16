@@ -12,7 +12,7 @@ from telegram.ext import (
 
 import database
 
-from handlers.admin_handlers import admin_generate_referral
+from handlers.admin_handlers import admin_generate_referral, show_referral_tree
 from handlers.file_handlers import (
     handle_files,
     handle_reply,  # اضافه شده
@@ -35,7 +35,12 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.DEBUG  # تغییر به DEBUG برای نمایش تمام لاگ‌ها
 )
-
+# غیرفعال کردن لاگ‌های کتابخانه‌های خارجی
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
+logging.getLogger("asyncio").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 db_path = "print3d.db"  # اگر مسیرش فرق داره، اصلاح کن
 
@@ -88,6 +93,7 @@ def main():
             generate_user_referral
         )
     )
+    app.add_handler(MessageHandler(filters.Regex("🌳 نمایش درخت دعوت"), show_referral_tree))
 
 
     app.run_polling()

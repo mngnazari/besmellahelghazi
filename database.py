@@ -9,6 +9,7 @@ from telegram import ReplyKeyboardMarkup
 import logging
 logger = logging.getLogger(__name__)
 
+
 # آی دی ادمین اصلی
 ADMIN_ID = 2138687434
 
@@ -472,3 +473,92 @@ def get_completed_orders(user_id):
     results = c.fetchall()
     conn.close()
     return results
+
+
+def get_referral_tree(user_id):
+    """دریافت ساختار درختی دعوت‌ها با لاگ‌های پیشرفته"""
+    conn = sqlite3.connect('print3d.db')
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+
+    try:
+        print(f"\n🔍 شروع کوئری برای user_id: {user_id}")
+
+        c.execute('''
+            WITH RECURSIVE referral_tree AS (
+                SELECT 
+                    id,
+                    full_name,
+                    phone,
+                    inviter_id,
+                    0 AS level
+                FROM users
+                WHERE id = ?
+
+                UNION ALL
+
+                SELECT 
+                    u.id,
+                    u.full_name,
+                    u.phone,
+                    u.inviter_id,
+                    rt.level + 1
+                FROM users u
+                INNER JOIN referral_tree rt ON u.inviter_id = rt.id
+            )
+            SELECT * FROM referral_tree
+        ''', (user_id,))
+
+        results = c.fetchall()
+        print(f"✅ تعداد رکوردهای بازیابی شده: {len(results)}")
+        for idx, row in enumerate(results):
+            print(f"   {idx + 1}. {dict(row)}")
+
+        return [dict(row) for row in results]
+
+    except Exception as e:
+        print(f"🔥 خطا: {str(e)}")
+        return []
+    finally:
+        conn.close()
+
+
+def format_referral_tree(tree_data):
+    """قالب‌بندی درخت با لاگ‌های تشخیصی"""
+    if not tree_data:
+        print("⚠️ داده‌ای برای فرمت‌بندی وجود ندارد!")
+        return "هیچ داده‌ای وجود ندارد"
+
+    print("\n🔍 شروع فرآیند فرمت‌بندی درخت:")
+    print("داده‌های خام:", tree_data)
+
+    try:
+        # ساختار درختی
+        tree = {}
+        for item in tree_data:
+            inviter_id = item['inviter_id']
+            if inviter_id not in tree:
+                tree[inviter_id] = []
+            tree[inviter_id].append(item)
+            print(f"   افزودن: {item['full_name']} (inviter: {inviter_id})")
+
+        print("\nساختار درختی ایجاد شده:", tree)
+
+        # تابع بازگشتی
+        def build_branch(parent_id, level=0):
+            branch = []
+            for child in tree.get(parent_id, []):
+                prefix = "    " * level + "└── " if level > 0 else ""
+                entry = f"{prefix}👤 {child['full_name']} ({child['phone']})"
+                print(f"ساخت شاخه: {entry}")
+                branch.append(entry)
+                branch.extend(build_branch(child['id'], level + 1))
+            return branch
+
+        final_output = "\n".join(build_branch(None))
+        print("\nخروجی نهایی:\n", final_output)
+        return final_output
+
+    except Exception as e:
+        print(f"🔥 خطا در فرمت‌بندی: {str(e)}")
+        return "خطا در نمایش ساختار"

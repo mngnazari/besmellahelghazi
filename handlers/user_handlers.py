@@ -8,6 +8,7 @@ from database import get_customer_kb
 import logging
 import sqlite3
 logger = logging.getLogger(__name__)
+
 # تنظیم سطح لاگ
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -20,6 +21,18 @@ FULL_NAME, PHONE = range(2)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
+
+    # اگر کاربر ادمین است و در جدول وجود ندارد، ثبت شود
+    if user.id == database.ADMIN_ID and not database.get_user(user.id):
+        user_data = (
+            user.id,
+            "ادمین",  # نام کامل ادمین
+            "بدون شماره",  # شماره تماس (اختیاری)
+            None,  # inviter_id برای ادمین None است
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
+        database.add_user(user_data)
 
     # اگر ادمین باشد
     if user.id == ADMIN_ID:
