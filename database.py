@@ -421,22 +421,22 @@ def add_discount(user_id, amount):
 
 
 # این تابع را حفظ کرده و اصلاح کنید
-def get_customer_kb(user_id):
-    """تهیه کیبورد مشتری با نمایش تعداد سفارشات فعال"""
-    from keyboards import ReplyKeyboardMarkup  # اضافه کردن ایمپورت
-
-    active_orders = get_active_orders_count(user_id)
-
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            ["📂 آرشیو", f"🔄 درحال انجام ({active_orders})"],
-            ["💳 کیف پول", "📞 پشتیبانی"],
-            ["📜 قوانین", "🧾 فاکتور"],
-            ["🎁 دریافت هدیه"]
-        ],
-        resize_keyboard=True,
-        is_persistent=True
-    )
+# def get_customer_kb(user_id):
+#     """تهیه کیبورد مشتری با نمایش تعداد سفارشات فعال"""
+#     from keyboards import ReplyKeyboardMarkup  # اضافه کردن ایمپورت
+#
+#     active_orders = get_active_orders_count(user_id)
+#
+#     return ReplyKeyboardMarkup(
+#         keyboard=[
+#             ["📂 آرشیو", f"🔄 درحال انجام ({active_orders})"],
+#             ["💳 کیف پول", "📞 پشتیبانی"],
+#             ["📜 قوانین", "🧾 فاکتور"],
+#             ["🎁 دریافت هدیه"]
+#         ],
+#         resize_keyboard=True,
+#         is_persistent=True
+#     )
 
 # در فایل database.py این تابع را اضافه کنید
 
@@ -562,3 +562,31 @@ def format_referral_tree(tree_data):
     except Exception as e:
         print(f"🔥 خطا در فرمت‌بندی: {str(e)}")
         return "خطا در نمایش ساختار"
+
+
+# database.py
+# فایل database.py
+def get_direct_invites(user_id):
+    """دریافت لیست مدعوین مستقیم کاربر"""
+    conn = sqlite3.connect('print3d.db')
+    conn.row_factory = sqlite3.Row  # برای دسترسی به ستون‌ها با نام
+    c = conn.cursor()
+
+    try:
+        c.execute('''
+            SELECT 
+                invited_full_name, 
+                invited_phone, 
+                DATE(invited_at) as invited_date
+            FROM invited_users 
+            WHERE referrer_id = ?
+            ORDER BY invited_at DESC
+        ''', (user_id,))
+
+        return [dict(row) for row in c.fetchall()]  # تبدیل به دیکشناری برای دسترسی آسان
+
+    except Exception as e:
+        print(f"خطا در دریافت مدعوین مستقیم: {str(e)}")
+        return []
+    finally:
+        conn.close()

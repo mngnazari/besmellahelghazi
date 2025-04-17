@@ -10,6 +10,12 @@ from datetime import datetime, timedelta
 import secrets
 import string
 
+from telegram import ReplyKeyboardMarkup
+
+import logging
+logger = logging.getLogger(__name__)
+
+
 # آی دی ادمین اصلی
 ADMIN_ID = 2138687434
 
@@ -54,7 +60,7 @@ def create_tables():
                      full_name TEXT,
                      phone TEXT UNIQUE,
                      inviter_id INTEGER,
-                     remaining_invites INTEGER DEFAULT 5,
+                     remaining_invites INTEGER DEFAULT 1,
                      created_at TEXT,
                      updated_at TEXT
                  )''')
@@ -101,55 +107,82 @@ def create_tables():
 # توابع کاربران
 # ----------------------
 def add_user(user_data):
-    """اضافه کردن کاربر جدید"""
+    """اضافه کردن کاربر جدید با مدیریت خطاهای پیشرفته"""
+    conn = None
     try:
         conn = sqlite3.connect('print3d.db')
         c = conn.cursor()
+
+        # بررسی وجود شماره تلفن تکراری
+        c.execute("SELECT id FROM users WHERE phone = ?", (user_data[2],))
+        if c.fetchone():
+            raise sqlite3.IntegrityError("شماره تلفن تکراری")
+
+        # درج کاربر جدید
         c.execute('''INSERT INTO users 
-                     (id, full_name, phone, inviter_id, created_at, updated_at)
-                     VALUES (?, ?, ?, ?, ?, ?)''', user_data)
+                    (id, full_name, phone, inviter_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)''', user_data)
+
         # ایجاد رکورد کیف پول
-        c.execute('''INSERT INTO wallets (user_id) VALUES (?)''', (user_data[0],))
+        c.execute('''INSERT INTO wallets (user_id, balance, discount)
+                    VALUES (?, 0, 0)''', (user_data[0],))
+
         conn.commit()
         return True
+
     except sqlite3.IntegrityError as e:
-        print(f"Error adding user: {str(e)}")
+        print(f"❗خطای یکتایی: {str(e)}")
+        raise  # بازگرداندن خطا برای مدیریت در لایه بالاتر
+    except Exception as e:
+        print(f"🔥 خطای سیستمی در افزودن کاربر: {str(e)}")
+        if conn:
+            conn.rollback()
         return False
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 
 # ----------------------
 # توابع رفرال
 # ----------------------
-def create_referral(user_id, is_admin=False):  # پارامتر is_admin اضافه شد
+def create_referral(user_id, is_admin=False):
+    """ایجاد کد دعوت جدید"""
+    conn = None
     try:
         conn = sqlite3.connect('print3d.db')
         c = conn.cursor()
 
-        # اگر کاربر ادمین است محدودیت ندارد
+        # بررسی ظرفیت دعوت برای کاربران عادی
         if not is_admin:
             c.execute("SELECT remaining_invites FROM users WHERE id = ?", (user_id,))
             remaining = c.fetchone()[0]
             if remaining <= 0:
                 return None, "ظرفیت دعوت شما تکمیل شده است"
 
-        # تولید کد
+        # تولید کد رفرال
         code = generate_referral_code()
 
-        # تنظیم انقضا
+        # تنظیم تاریخ انقضا (۱ سال)
         expires = (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d %H:%M:%S")
 
+        # ذخیره در دیتابیس
         c.execute('''INSERT INTO referrals 
-                     (referrer_id, referral_code, created_at, expires_at, is_admin)
-                     VALUES (?, ?, ?, ?, ?)''',
+                    (referrer_id, referral_code, created_at, expires_at, is_admin)
+                    VALUES (?, ?, ?, ?, ?)''',
                   (user_id, code, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), expires, is_admin))
 
         conn.commit()
         return code, None
+
+    except sqlite3.IntegrityError:
+        return None, "کد دعوت تکراری است. لطفاً مجدد تلاش کنید."
     except Exception as e:
-        print(f"Error: {str(e)}")
+        print(f"🔥 خطا در ایجاد کد دعوت: {str(e)}")
         return None, "خطای سیستمی"
+    finally:
+        if conn:
+            conn.close()
 
 
 def validate_referral(code):
@@ -157,34 +190,44 @@ def validate_referral(code):
         conn = sqlite3.connect('print3d.db')
         c = conn.cursor()
 
-        c.execute('''SELECT referrer_id, expires_at, used_by, is_admin 
+        c.execute('''SELECT referrer_id, expires_at 
                      FROM referrals 
-                     WHERE referral_code = ?''', (code,))
+                     WHERE referral_code = ? 
+                     AND used_by IS NULL
+                     AND expires_at > CURRENT_TIMESTAMP''',
+                  (code,))
+
         result = c.fetchone()
-
         if not result:
-            return False, "کد نامعتبر"
+            return False, "کد نامعتبر یا منقضی شده است"
 
-        referrer_id, expires_at, used_by, is_admin = result
-
-        if used_by:
-            return False, "کد قبلاً استفاده شده"
-
-        if datetime.now() > datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S"):
-            return False, "کد منقضی شده"
-
-        if not is_admin:
-            c.execute("SELECT remaining_invites FROM users WHERE id = ?", (referrer_id,))
-            remaining = c.fetchone()[0]
-            if remaining <= 0:
-                return False, "ظرفیت دعوت تکمیل شده است"
-
+        referrer_id, expires_at = result
         return True, referrer_id
+
     except Exception as e:
-        print(f"Error validating referral: {str(e)}")
+        logger.error(f"خطا در اعتبارسنجی: {str(e)}")
         return False, "خطای سیستمی"
     finally:
         conn.close()
+
+
+def add_invited_user(referrer_id, user_data):
+    try:
+        conn = sqlite3.connect('print3d.db')
+        c = conn.cursor()
+        c.execute('''INSERT INTO invited_users 
+                     (referrer_id, invited_user_id, invited_full_name, invited_phone, invited_at)
+                     VALUES (?, ?, ?, ?, ?)''',
+                  (referrer_id, *user_data))
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error adding invited user: {str(e)}")
+        return False
+    finally:
+        conn.close()
+
+
 
 
 def mark_referral_used(code, used_by):
@@ -346,6 +389,209 @@ def update_file_quantity(file_id, new_qty):
     finally:
         conn.close()
 
+def delete_file(file_id):
+    conn = sqlite3.connect('print3d.db')
+    c = conn.cursor()
+    c.execute("DELETE FROM files WHERE file_id = ?", (file_id,))
+    conn.commit()
+    conn.close()
+
+def get_remaining_invites(user_id):
+    conn = sqlite3.connect('print3d.db')
+    c = conn.cursor()
+    c.execute("SELECT remaining_invites FROM users WHERE id = ?", (user_id,))
+    result = c.fetchone()
+    conn.close()
+    return result[0] if result else 0
+
+
+def add_discount(user_id, amount):
+    try:
+        conn = sqlite3.connect('print3d.db')
+        c = conn.cursor()
+
+        c.execute("""
+            UPDATE wallets 
+            SET discount = discount + ? 
+            WHERE user_id = ?
+        """, (amount, user_id))
+
+        conn.commit()
+        return c.rowcount > 0
+
+    except Exception as e:
+        print(f"خطا در افزودن تخفیف: {str(e)}")
+        return False
+    finally:
+        conn.close()
+
+
+# این تابع را حفظ کرده و اصلاح کنید
+def get_customer_kb(user_id):
+    """تهیه کیبورد مشتری با نمایش تعداد سفارشات فعال"""
+    from keyboards import ReplyKeyboardMarkup  # اضافه کردن ایمپورت
+
+    active_orders = get_active_orders_count(user_id)
+
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            ["📂 آرشیو", f"🔄 درحال انجام ({active_orders})"],
+            ["💳 کیف پول", "📞 پشتیبانی"],
+            ["📜 قوانین", "🧾 فاکتور"],
+            ["🎁 دریافت هدیه"]
+        ],
+        resize_keyboard=True,
+        is_persistent=True
+    )
+
+# در فایل database.py این تابع را اضافه کنید
+
+def meets_gift_conditions(user_id):
+    try:
+        conn = sqlite3.connect('print3d.db')
+        c = conn.cursor()
+
+        # مثال: حداقل ۳ سفارش تکمیل شده
+        c.execute("""
+            SELECT COUNT(*) FROM files 
+            WHERE user_id = ? 
+            AND status = 'تکمیل شده'
+        """, (user_id,))
+
+        result = c.fetchone()
+        return result[0] >= 3 if result else False
+
+    except Exception as e:
+        print(f"خطا در بررسی شرایط هدیه: {str(e)}")
+        return False
+    finally:
+        conn.close()
+
+def get_completed_orders(user_id):
+    """دریافت سفارشات تکمیل شده"""
+    conn = sqlite3.connect('print3d.db')
+    c = conn.cursor()
+    c.execute("""
+        SELECT * FROM files 
+        WHERE user_id = ? 
+        AND status = 'تکمیل شده'
+    """, (user_id,))
+    results = c.fetchall()
+    conn.close()
+    return results
+
+
+def get_referral_tree(user_id):
+    """دریافت ساختار درختی دعوت‌ها با لاگ‌های پیشرفته"""
+    conn = sqlite3.connect('print3d.db')
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+
+    try:
+        print(f"\n🔍 شروع کوئری برای user_id: {user_id}")
+
+        c.execute('''
+            WITH RECURSIVE referral_tree AS (
+                SELECT 
+                    id,
+                    full_name,
+                    phone,
+                    inviter_id,
+                    0 AS level
+                FROM users
+                WHERE id = ?
+
+                UNION ALL
+
+                SELECT 
+                    u.id,
+                    u.full_name,
+                    u.phone,
+                    u.inviter_id,
+                    rt.level + 1
+                FROM users u
+                INNER JOIN referral_tree rt ON u.inviter_id = rt.id
+            )
+            SELECT * FROM referral_tree
+        ''', (user_id,))
+
+        results = c.fetchall()
+        print(f"✅ تعداد رکوردهای بازیابی شده: {len(results)}")
+        for idx, row in enumerate(results):
+            print(f"   {idx + 1}. {dict(row)}")
+
+        return [dict(row) for row in results]
+
+    except Exception as e:
+        print(f"🔥 خطا: {str(e)}")
+        return []
+    finally:
+        conn.close()
+
+
+def format_referral_tree(tree_data):
+    """قالب‌بندی درخت با لاگ‌های تشخیصی"""
+    if not tree_data:
+        print("⚠️ داده‌ای برای فرمت‌بندی وجود ندارد!")
+        return "هیچ داده‌ای وجود ندارد"
+
+    print("\n🔍 شروع فرآیند فرمت‌بندی درخت:")
+    print("داده‌های خام:", tree_data)
+
+    try:
+        # ساختار درختی
+        tree = {}
+        for item in tree_data:
+            inviter_id = item['inviter_id']
+            if inviter_id not in tree:
+                tree[inviter_id] = []
+            tree[inviter_id].append(item)
+            print(f"   افزودن: {item['full_name']} (inviter: {inviter_id})")
+
+        print("\nساختار درختی ایجاد شده:", tree)
+
+        # تابع بازگشتی
+        def build_branch(parent_id, level=0):
+            branch = []
+            for child in tree.get(parent_id, []):
+                prefix = "    " * level + "└── " if level > 0 else ""
+                entry = f"{prefix}👤 {child['full_name']} ({child['phone']})"
+                print(f"ساخت شاخه: {entry}")
+                branch.append(entry)
+                branch.extend(build_branch(child['id'], level + 1))
+            return branch
+
+        final_output = "\n".join(build_branch(None))
+        print("\nخروجی نهایی:\n", final_output)
+        return final_output
+
+    except Exception as e:
+        print(f"🔥 خطا در فرمت‌بندی: {str(e)}")
+        return "خطا در نمایش ساختار"
+
+
+# database.py
+def get_direct_invites(user_id):
+    """دریافت لیست مدعوین مستقیم کاربر"""
+    conn = sqlite3.connect('print3d.db')
+    c = conn.cursor()
+
+    try:
+        c.execute('''
+            SELECT invited_full_name, invited_phone, invited_at 
+            FROM invited_users 
+            WHERE referrer_id = ?
+            ORDER BY invited_at DESC
+        ''', (user_id,))
+
+        return c.fetchall()
+
+    except Exception as e:
+        print(f"خطا در دریافت مدعوین مستقیم: {str(e)}")
+        return []
+    finally:
+        conn.close()
+
 ==================================================
 # فایل: keyboards.py
 ==================================================
@@ -360,12 +606,13 @@ from telegram import (
 import database
 
 # کیبورد کاربران
+# کیبورد پایه بدون نمایش تعداد
 customer_kb = ReplyKeyboardMarkup(
     [
         ["📂 آرشیو", "🔄 درحال انجام"],
         ["💳 کیف پول", "📞 پشتیبانی"],
-        ["👥 مدعوین من", "🎁 دریافت لینک دعوت"],
-        ["📜 قوانین"]
+        ["📜 قوانین", "🧾 فاکتور"],
+        ["🎁 دریافت هدیه"]
     ],
     resize_keyboard=True,
     is_persistent=True
@@ -383,8 +630,9 @@ archive_reply_kb = ReplyKeyboardMarkup(
 # کیبورد ادمین باید دقیقاً همین متن را داشته باشد
 admin_kb = ReplyKeyboardMarkup(
     [
-        ["🔗 تولید لینک دعوت نامحدود"],  # متن باید دقیقاً همین باشد
-        ["👥 لیست مشتریان", "📊 آمار سیستم"]
+        ["🔗 تولید لینک دعوت نامحدود"],
+        ["👥 لیست مشتریان", "📊 آمار سیستم"],
+        ["🌳 نمایش درخت دعوت"]  # دکمه جدید
     ],
     resize_keyboard=True
 )
@@ -442,7 +690,7 @@ from telegram.ext import (
 
 import database
 
-from handlers.admin_handlers import admin_generate_referral
+from handlers.admin_handlers import admin_generate_referral, show_referral_tree
 from handlers.file_handlers import (
     handle_files,
     handle_reply,  # اضافه شده
@@ -457,7 +705,7 @@ from handlers.user_handlers import (
     handle_active_orders,
     handle_archive,
     show_archive,
-    start
+    start, generate_user_referral, handle_gift_request, show_direct_invites
 )
 import logging
 
@@ -465,7 +713,12 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.DEBUG  # تغییر به DEBUG برای نمایش تمام لاگ‌ها
 )
-
+# غیرفعال کردن لاگ‌های کتابخانه‌های خارجی
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
+logging.getLogger("asyncio").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 db_path = "print3d.db"  # اگر مسیرش فرق داره، اصلاح کن
 
@@ -509,6 +762,18 @@ def main():
     # تغییر قسمت اضافه کردن هندلر
     app.add_handler(MessageHandler(filters.Regex("🔗 تولید لینک دعوت نامحدود"), admin_generate_referral))
     app.add_handler(CallbackQueryHandler(handle_callback))  # اضافه کردن هندلر
+    # به لیست handlers اضافه کنید:
+
+    # در بخش اضافه کردن هندلرها:
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(r"^🎁 دریافت هدیه$"),  # مطمئن شوید متن دکمه دقیقاً همین باشد
+            generate_user_referral
+        )
+    )
+    app.add_handler(MessageHandler(filters.Regex("🌳 نمایش درخت دعوت"), show_referral_tree))
+    app.add_handler(MessageHandler(filters.Regex("^👥 مدعوین من$"), show_direct_invites))
+
     app.run_polling()
 
 
@@ -557,6 +822,30 @@ async def show_users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(response)
 
+
+async def show_referral_tree(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != database.ADMIN_ID:
+        return
+
+    try:
+        tree_data = database.get_referral_tree(database.ADMIN_ID)
+        if not tree_data:
+            await update.message.reply_text("ℹ️ هیچ ساختار دعوتی وجود ندارد.")
+            return
+
+        formatted_tree = database.format_referral_tree(tree_data)
+
+        # ارسال به صورت کد برای حفظ فرمت
+        await update.message.reply_text(
+            f"🌳 ساختار درختی دعوت‌ها:\n\n"
+            f"<code>{formatted_tree}</code>",
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+        print(f"خطا: {str(e)}")
+        await update.message.reply_text("❌ خطا در نمایش درخت دعوت")
+
 ==================================================
 # فایل: handlers\file_handlers.py
 ==================================================
@@ -570,6 +859,7 @@ from keyboards import get_qty_keyboard
 import logging
 
 logger = logging.getLogger(__name__)
+
 
 async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -624,10 +914,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         logger.debug(f"Callback data received: {data}")
 
-        # لاگ اطلاعات پیام
-        logger.debug(f"Message content: {message.to_dict()}")
-
-        # بررسی وجود document در پیام
+        # دریافت file_id از پیام اصلی
         if not message.document:
             logger.error("No document found in the message!")
             return
@@ -635,25 +922,57 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_id = message.document.file_id
         logger.info(f"Processing file ID: {file_id}")
 
-        # مدیریت رویدادها
+        # مدیریت انواع callback
         if data == "edit_qty":
-            logger.debug("Edit quantity requested")
             current_qty = database.get_file_quantity(file_id)
-            logger.debug(f"Current quantity from DB: {current_qty}")
-            # ... بقیه کدها
+            await message.edit_reply_markup(
+                reply_markup=keyboards.get_qty_keyboard(current_qty)
+            )
 
         elif data in ("qty_up", "qty_down"):
-            logger.debug("Quantity change requested")
-            # ... بقیه کدها
+            current_qty = int(message.reply_markup.inline_keyboard[0][1].text)
+
+            if data == "qty_up":
+                new_qty = current_qty + 1
+            else:
+                new_qty = max(1, current_qty - 1)
+
+            # آپدیت کیبورد
+            await message.edit_reply_markup(
+                reply_markup=keyboards.get_qty_keyboard(new_qty)
+            )
 
         elif data == "qty_confirm":
-            logger.debug("Quantity confirmation requested")
-            # ... بقیه کدها
+            final_qty = int(message.reply_markup.inline_keyboard[0][1].text)
+            if database.update_file_quantity(file_id, final_qty):
+                # آپدیت کپشن
+                new_caption = message.caption.split('\n')
+                new_caption[1] = f"🧮 تعداد: {final_qty}"
+                await message.edit_caption(
+                    caption="\n".join(new_caption),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("تعداد 🧮", callback_data="edit_qty")],
+                        [InlineKeyboardButton("انصراف ❌", callback_data="cancel_file")]
+                    ])
+                )
+            else:
+                await query.answer("❌ خطا در بروزرسانی تعداد!")
 
-        # لاگ خطاها
+        elif data == "qty_cancel":
+            await message.edit_reply_markup(
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("تعداد 🧮", callback_data="edit_qty")],
+                    [InlineKeyboardButton("انصراف ❌", callback_data="cancel_file")]
+                ])
+            )
+
+        elif data == "cancel_file":
+            await message.delete()
+            database.delete_file(file_id)  # نیاز به پیاده‌سازی تابع delete_file در دیتابیس
+
     except Exception as e:
-        logger.error(f"Critical error: {str(e)}", exc_info=True)
-        await query.answer("⚠️ خطای سیستمی!")
+        logger.error(f"Error in callback handler: {str(e)}", exc_info=True)
+        await query.answer("⚠️ خطای سیستمی رخ داد!")
 
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -700,9 +1019,18 @@ from telegram import Update, ReplyKeyboardRemove, KeyboardButton, ReplyKeyboardM
 from telegram.ext import ContextTypes, ConversationHandler
 from datetime import datetime
 import database
-from keyboards import customer_kb, admin_kb, wallet_kb
+from keyboards import customer_kb, admin_kb, wallet_kb, archive_reply_kb
 from jdatetime import datetime as jdatetime
+from database import get_customer_kb
+import logging
+import sqlite3
+logger = logging.getLogger(__name__)
 
+# تنظیم سطح لاگ
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.DEBUG
+)
 ADMIN_ID = 2138687434
 FULL_NAME, PHONE = range(2)
 
@@ -711,17 +1039,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
 
+    # اگر کاربر ادمین است و در جدول وجود ندارد، ثبت شود
+    if user.id == database.ADMIN_ID and not database.get_user(user.id):
+        user_data = (
+            user.id,
+            "ادمین",  # نام کامل ادمین
+            "بدون شماره",  # شماره تماس (اختیاری)
+            None,  # inviter_id برای ادمین None است
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
+        database.add_user(user_data)
+
+    # اگر ادمین باشد
     if user.id == ADMIN_ID:
         await update.message.reply_text("👑 پنل مدیریتی فعال شد!", reply_markup=admin_kb)
         return ConversationHandler.END
 
+    # بررسی ثبت‌نام قبلی
     if database.get_user(user.id):
         await update.message.reply_text("✅ قبلاً ثبت نام کرده‌اید!")
         return ConversationHandler.END
 
+    # استخراج کد رفرال
     referral_code = None
-    if args and args[0].startswith("ref_"):
-        referral_code = args[0][4:]
+    if args:
+        for arg in args:
+            if arg.startswith("ref_"):
+                referral_code = arg[4:]
+                break
 
     if not referral_code:
         await update.message.reply_text("🔒 دسترسی فقط از طریق لینک دعوت ممکن است!")
@@ -730,6 +1076,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["referral_code"] = referral_code
     await update.message.reply_text("👤 لطفاً نام کامل خود را وارد کنید:")
     return FULL_NAME
+
 
 
 async def get_full_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -747,7 +1094,7 @@ async def get_full_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     try:
-        # دریافت اطلاعات تماس
+        # دریافت شماره تماس
         if update.message.contact:
             phone = update.message.contact.phone_number
         else:
@@ -755,15 +1102,14 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not phone.startswith('+'):
                 phone = f"+98{phone[-10:]}"
 
-        # اعتبارسنجی کد دعوت
+        # اعتبارسنجی نهایی کد رفرال
         referral_code = context.user_data.get("referral_code")
         valid, inviter_id = database.validate_referral(referral_code)
-
         if not valid:
-            await update.message.reply_text("❌ کد دعوت نامعتبر!")
+            await update.message.reply_text(f"❌ {inviter_id}")
             return ConversationHandler.END
 
-        # ذخیره کاربر
+        # آماده‌سازی داده‌های کاربر
         user_data = (
             user.id,
             context.user_data["full_name"],
@@ -773,20 +1119,37 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
             datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         )
 
+        # تلاش برای ذخیره کاربر
         if database.add_user(user_data):
-            if inviter_id != ADMIN_ID:
-                database.add_discount(inviter_id, 50)
+            # عملیات پس از ثبت موفق
+            if inviter_id != database.ADMIN_ID:
                 database.decrement_invites(inviter_id)
+                database.add_discount(inviter_id, 50)
+                database.add_invited_user(inviter_id, (
+                    user.id,
+                    context.user_data["full_name"],
+                    phone,
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                ))
 
-            await update.message.reply_text("✅ ثبت نام موفق!", reply_markup=customer_kb)
+            # علامت‌گذاری کد به عنوان استفاده شده
+            database.mark_referral_used(referral_code, user.id)
+
+            await update.message.reply_text(
+                "✅ ثبت نام با موفقیت انجام شد!",
+                reply_markup=database.get_customer_kb(user.id)
+            )
         else:
-            await update.message.reply_text("❌ خطا در ثبت اطلاعات!")
+            await update.message.reply_text("❌ خطا در ذخیره اطلاعات کاربر")
 
+    except sqlite3.IntegrityError as e:
+        await update.message.reply_text("❌ این شماره تماس قبلاً ثبت شده است!")
     except Exception as e:
-        print(f"خطای سیستمی: {str(e)}")
-        await update.message.reply_text("❌ خطای سیستمی! لطفاً مجدداً تلاش کنید.")
-
-    return ConversationHandler.END
+        logging.exception("🔥 خطای بحرانی در ثبت نام:")
+        await update.message.reply_text("❌ خطای سیستمی! لطفاً اطلاعات را بررسی کنید و مجدد تلاش کنید.")
+    finally:
+        context.user_data.clear()
+        return ConversationHandler.END
 
 
 async def show_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -866,3 +1229,99 @@ async def handle_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ فایل‌های شما ارسال شدند!",
         reply_markup=customer_kb
     )
+
+
+async def generate_user_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    try:
+        logger.info(f"درخواست لینک دعوت از کاربر {user.id}")
+
+        # بررسی وجود کاربر در دیتابیس
+        if not database.get_user(user.id):
+            await update.message.reply_text("❌ لطفاً ابتدا ثبت نام کنید!")
+            return
+
+        # دریافت تعداد دعوت‌های باقی‌مانده
+        remaining = database.get_remaining_invites(user.id)
+        if remaining <= 0:
+            await update.message.reply_text("❌ ظرفیت دعوت شما تکمیل شده است!")
+            return
+
+        # تولید کد رفرال جدید
+        code, error = database.create_referral(user.id, is_admin=False)
+        if error:
+            await update.message.reply_text(f"❌ {error}")
+            return
+
+        # ساخت لینک دعوت با فرمت صحیح
+        bot = await context.bot.get_me()
+        referral_link = f"https://t.me/{bot.username}?start=ref_{code}"
+
+        # ارسال پاسخ با فرمت HTML برای هایپرلینک
+        await update.message.reply_text(
+            f"🎉 <b>لینک دعوت شما:</b>\n"
+            f"<a href='{referral_link}'>کلیک کنید برای دعوت</a>\n\n"
+            f"🔢 تعداد دعوت باقی‌مانده: <b>{remaining}</b>\n"
+            "⚠️ توجه: کاربر باید مستقیم روی لینک بالا کلیک کند!",
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+
+        logger.info(f"لینک دعوت برای کاربر {user.id} تولید شد: {code}")
+
+    except Exception as e:
+        logger.error(f"خطا در تولید لینک دعوت: {str(e)}", exc_info=True)
+        await update.message.reply_text("❌ خطای سیستمی! لطفاً مجدداً تلاش کنید.")
+
+
+async def handle_gift_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    try:
+        logger.debug(f"شروع پردازش درخواست هدیه برای کاربر {user.id}")
+
+        # لاگ اطلاعات کاربر
+        user_data = database.get_user(user.id)
+        logger.debug(f"اطلاعات کاربر: {user_data}")
+
+        # بررسی شرایط
+        logger.debug("بررسی شرایط دریافت هدیه")
+        if database.meets_gift_conditions(user.id):
+            logger.debug("کاربر واجد شرایط است")
+
+            # افزودن اعتبار
+            logger.debug("در حال افزودن اعتبار...")
+            if database.add_discount(user.id, 100):
+                logger.debug("اعتبار با موفقیت افزوده شد")
+                await update.message.reply_text("🎉 100 دلار اعتبار هدیه دریافت کردید!")
+            else:
+                logger.error("خطا در افزودن اعتبار")
+                await update.message.reply_text("❌ خطا در اعطای هدیه!")
+
+        else:
+            logger.debug("کاربر واجد شرایط نیست")
+            await update.message.reply_text("⚠️ شما شرایط دریافت هدیه را ندارید.")
+
+    except Exception as e:
+        logger.exception(f"خطای بحرانی: {str(e)}")
+        await update.message.reply_text("❌ خطای سیستمی! لطفاً بعداً تلاش کنید.")
+
+
+# user_handlers.py
+async def show_direct_invites(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    try:
+        invites = database.get_direct_invites(user.id)
+
+        if not invites:
+            await update.message.reply_text("ℹ️ هنوز کسی را دعوت نکرده‌اید!")
+            return
+
+        response = "📋 لیست مدعوین مستقیم شما:\n\n"
+        for idx, (name, phone, date) in enumerate(invites, 1):
+            response += f"{idx}. {name} - 📞 {phone}\n🕒 {date}\n\n"
+
+        await update.message.reply_text(response)
+
+    except Exception as e:
+        logging.error(f"خطا در نمایش مدعوین: {str(e)}")
+        await update.message.reply_text("❌ خطای سیستمی!")

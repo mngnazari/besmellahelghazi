@@ -2,9 +2,10 @@ from telegram import Update, ReplyKeyboardRemove, KeyboardButton, ReplyKeyboardM
 from telegram.ext import ContextTypes, ConversationHandler
 from datetime import datetime
 import database
+import keyboards
 from keyboards import customer_kb, admin_kb, wallet_kb, archive_reply_kb
 from jdatetime import datetime as jdatetime
-from database import get_customer_kb
+
 import logging
 import sqlite3
 logger = logging.getLogger(__name__)
@@ -83,13 +84,15 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             phone = update.message.text.strip()
             if not phone.startswith('+'):
-                phone = f"+98{phone[-10:]}"
+                phone = f"+98{phone[-10:]}"  # فرمت ایران
 
         # اعتبارسنجی نهایی کد رفرال
         referral_code = context.user_data.get("referral_code")
-        valid, inviter_id = database.validate_referral(referral_code)
-        if not valid:
-            await update.message.reply_text(f"❌ {inviter_id}")
+        is_valid, referrer_id = database.validate_referral(referral_code)
+
+        if not is_valid:
+            await update.message.reply_text(f"❌ {referrer_id}")
+            context.user_data.clear()
             return ConversationHandler.END
 
         # آماده‌سازی داده‌های کاربر
@@ -97,39 +100,50 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user.id,
             context.user_data["full_name"],
             phone,
-            inviter_id,
+            referrer_id,  # inviter_id از کد رفرال
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         )
 
-        # تلاش برای ذخیره کاربر
+        # ذخیره کاربر جدید
         if database.add_user(user_data):
-            # عملیات پس از ثبت موفق
-            if inviter_id != database.ADMIN_ID:
-                database.decrement_invites(inviter_id)
-                database.add_discount(inviter_id, 50)
-                database.add_invited_user(inviter_id, (
-                    user.id,
-                    context.user_data["full_name"],
-                    phone,
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                ))
+            # ثبت مدعو در لیست دعوت‌کننده
+            invited_user_data = (
+                user.id,
+                context.user_data["full_name"],
+                phone,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            )
 
-            # علامت‌گذاری کد به عنوان استفاده شده
+            # افزودن به جدول مدعوین
+            success = database.add_invited_user(
+                referrer_id=referrer_id,
+                user_data=invited_user_data
+            )
+
+            if not success:
+                logging.error(f"خطا در ثبت مدعو برای کاربر {user.id}")
+
+            # کاهش تعداد دعوت‌های باقی‌مانده (اگر کاربر عادی باشد)
+            if referrer_id != database.ADMIN_ID:
+                database.decrement_invites(referrer_id)
+                database.add_discount(referrer_id, 50)
+
+            # علامت‌گذاری کد رفرال به عنوان استفاده شده
             database.mark_referral_used(referral_code, user.id)
 
             await update.message.reply_text(
-                "✅ ثبت نام با موفقیت انجام شد!",
-                reply_markup=database.get_customer_kb(user.id)
+                "✅ ثبت نام موفق! لطفا از منوی زیر استفاده کنید:",
+                reply_markup=keyboards.customer_kb
             )
         else:
-            await update.message.reply_text("❌ خطا در ذخیره اطلاعات کاربر")
+            await update.message.reply_text("❌ خطا در ثبت اطلاعات کاربر!")
 
-    except sqlite3.IntegrityError as e:
-        await update.message.reply_text("❌ این شماره تماس قبلاً ثبت شده است!")
+    except sqlite3.IntegrityError:
+        await update.message.reply_text("❌ این شماره قبلاً ثبت شده است!")
     except Exception as e:
-        logging.exception("🔥 خطای بحرانی در ثبت نام:")
-        await update.message.reply_text("❌ خطای سیستمی! لطفاً اطلاعات را بررسی کنید و مجدد تلاش کنید.")
+        logging.exception(f"🔥 خطای بحرانی: {str(e)}")
+        await update.message.reply_text("❌ خطای سیستمی! لطفاً مجدد تلاش کنید.")
     finally:
         context.user_data.clear()
         return ConversationHandler.END
@@ -287,3 +301,29 @@ async def handle_gift_request(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         logger.exception(f"خطای بحرانی: {str(e)}")
         await update.message.reply_text("❌ خطای سیستمی! لطفاً بعداً تلاش کنید.")
+
+
+# user_handlers.py
+# فایل handlers/user_handlers.py
+async def show_direct_invites(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    try:
+        invites = database.get_direct_invites(user.id)
+
+        if not invites:
+            await update.message.reply_text("ℹ️ هنوز کسی را دعوت نکرده‌اید!")
+            return
+
+        response = "📋 لیست مدعوین مستقیم شما:\n\n"
+        for idx, invite in enumerate(invites, 1):
+            response += (
+                f"{idx}. 👤 {invite['invited_full_name']}\n"
+                f"   📞 {invite['invited_phone']}\n"
+                f"   📅 {invite['invited_date']}\n\n"
+            )
+
+        await update.message.reply_text(response)
+
+    except Exception as e:
+        logging.error(f"خطا در نمایش مدعوین: {str(e)}", exc_info=True)
+        await update.message.reply_text("❌ خطای سیستمی!")

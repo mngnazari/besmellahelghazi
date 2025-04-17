@@ -1,6 +1,6 @@
 import os
 from telegram.ext import CallbackQueryHandler
-
+import keyboards  # <--- این خط را اضافه کنید
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -27,7 +27,7 @@ from handlers.user_handlers import (
     handle_active_orders,
     handle_archive,
     show_archive,
-    start, generate_user_referral, handle_gift_request
+    start, generate_user_referral, handle_gift_request, show_direct_invites
 )
 import logging
 
@@ -94,7 +94,7 @@ def main():
         )
     )
     app.add_handler(MessageHandler(filters.Regex("🌳 نمایش درخت دعوت"), show_referral_tree))
-
+    app.add_handler(MessageHandler(filters.Regex("^👥 مدعوین من$"), show_direct_invites))
 
     app.run_polling()
 
